@@ -29,24 +29,63 @@
  */
 
 #include "Adafruit_BMP085.h"
-#include <Adafruit_I2CDevice.h>
+#include <driver/i2c_master.h>
+#include <esp_err.h>
+#include <esp_log.h>
+#include <freertos/FreeRTOS.h>
+#include <math.h>
 
-Adafruit_BMP085::Adafruit_BMP085() { i2c_dev = nullptr; }
+#define BMP085_DEBUG 0  //!< Debug mode
 
-bool Adafruit_BMP085::begin(uint8_t mode, TwoWire *wire) {
-  if (mode > BMP085_ULTRAHIGHRES)
-    mode = BMP085_ULTRAHIGHRES;
-  oversampling = mode;
+#define BMP085_I2CADDR 0x77  //!< BMP085 I2C address
+
+#define BMP085_CAL_AC1 0xAA  //!< R   Calibration data (16 bits)
+#define BMP085_CAL_AC2 0xAC  //!< R   Calibration data (16 bits)
+#define BMP085_CAL_AC3 0xAE  //!< R   Calibration data (16 bits)
+#define BMP085_CAL_AC4 0xB0  //!< R   Calibration data (16 bits)
+#define BMP085_CAL_AC5 0xB2  //!< R   Calibration data (16 bits)
+#define BMP085_CAL_AC6 0xB4  //!< R   Calibration data (16 bits)
+#define BMP085_CAL_B1  0xB6  //!< R   Calibration data (16 bits)
+#define BMP085_CAL_B2  0xB8  //!< R   Calibration data (16 bits)
+#define BMP085_CAL_MB  0xBA  //!< R   Calibration data (16 bits)
+#define BMP085_CAL_MC  0xBC  //!< R   Calibration data (16 bits)
+#define BMP085_CAL_MD  0xBE  //!< R   Calibration data (16 bits)
+
+#define BMP085_CONTROL         0xF4  //!< Control register
+#define BMP085_TEMPDATA        0xF6  //!< Temperature data register
+#define BMP085_PRESSUREDATA    0xF6  //!< Pressure data register
+#define BMP085_READTEMPCMD     0x2E  //!< Read temperature control register value
+#define BMP085_READPRESSURECMD 0x34  //!< Read pressure control register value
+
+namespace {
+
+  constexpr unsigned I2C_TIMEOUT_MS = 50;
+
+  void delay(unsigned ms) {
+    vTaskDelay(ms / portTICK_PERIOD_MS);
+  }
+}  // namespace
+
+Adafruit_BMP085::Adafruit_BMP085() : i2c_dev(nullptr) {}
+
+bool Adafruit_BMP085::begin(mode m, i2c_master_bus_handle_t bus) {
+  if (m > mode::BMP085_ULTRAHIGHRES)
+    m = mode::BMP085_ULTRAHIGHRES;
+  oversampling = m;
 
   if (i2c_dev) {
-    delete i2c_dev; // remove old interface
+    i2c_master_bus_rm_device(i2c_dev);  // remove old interface
   }
 
-  i2c_dev = new Adafruit_I2CDevice(BMP085_I2CADDR, wire);
+  i2c_device_config_t cfg = {};
 
-  if (!i2c_dev->begin()) {
-    return false;
-  }
+  cfg.dev_addr_length = I2C_ADDR_BIT_LEN_7;
+  cfg.device_address = BMP085_I2CADDR;
+  cfg.flags.disable_ack_check = false;
+  cfg.scl_speed_hz = 100000;
+  cfg.scl_wait_us = 0;
+
+  ESP_ERROR_CHECK(i2c_master_bus_add_device(bus, &cfg, &i2c_dev));
 
   if (read8(0xD0) != 0x55)
     return false;
@@ -116,11 +155,11 @@ uint32_t Adafruit_BMP085::readRawPressure(void) {
 
   write8(BMP085_CONTROL, BMP085_READPRESSURECMD + (oversampling << 6));
 
-  if (oversampling == BMP085_ULTRALOWPOWER)
+  if (oversampling == mode::BMP085_ULTRALOWPOWER)
     delay(5);
-  else if (oversampling == BMP085_STANDARD)
+  else if (oversampling == mode::BMP085_STANDARD)
     delay(8);
-  else if (oversampling == BMP085_HIGHRES)
+  else if (oversampling == mode::BMP085_HIGHRES)
     delay(14);
   else
     delay(26);
@@ -248,7 +287,7 @@ int32_t Adafruit_BMP085::readSealevelPressure(float altitude_meters) {
 }
 
 float Adafruit_BMP085::readTemperature(void) {
-  int32_t UT, B5; // following ds convention
+  int32_t UT, B5;  // following ds convention
   float temp;
 
   UT = readRawTemperature();
@@ -285,7 +324,8 @@ uint8_t Adafruit_BMP085::read8(uint8_t a) {
   uint8_t ret;
 
   // send 1 byte, reset i2c, read 1 byte
-  i2c_dev->write_then_read(&a, 1, &ret, 1, true);
+  //i2c_dev->write_then_read(&a, 1, &ret, 1, true);
+  ESP_ERROR_CHECK(i2c_master_transmit_receive(i2c_dev, &a, 1, &ret, 1, I2C_TIMEOUT_MS));
 
   return ret;
 }
@@ -297,7 +337,8 @@ uint16_t Adafruit_BMP085::read16(uint8_t a) {
   // send 1 byte, reset i2c, read 2 bytes
   // we could typecast uint16_t as uint8_t array but would need to ensure proper
   // endianness
-  i2c_dev->write_then_read(&a, 1, retbuf, 2, true);
+  //i2c_dev->write_then_read(&a, 1, retbuf, 2, true);
+  ESP_ERROR_CHECK(i2c_master_transmit_receive(i2c_dev, &a, 1, retbuf, 2, I2C_TIMEOUT_MS));
 
   // write_then_read uses uint8_t array
   ret = retbuf[1] | (retbuf[0] << 8);
@@ -306,6 +347,8 @@ uint16_t Adafruit_BMP085::read16(uint8_t a) {
 }
 
 void Adafruit_BMP085::write8(uint8_t a, uint8_t d) {
+  uint8_t buf[2] = {a, d};
   // send d prefixed with a (a d [stop])
-  i2c_dev->write(&d, 1, true, &a, 1);
+  //i2c_dev->write(&d, 1, true, &a, 1);
+  ESP_ERROR_CHECK(i2c_master_transmit(i2c_dev, buf, 2, I2C_TIMEOUT_MS));
 }
