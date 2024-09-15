@@ -22,6 +22,7 @@
  *
  * Written by Limor Fried/Ladyada for Adafruit Industries.
  * Updated by Samy Kamkar for cross-platform support.
+ * Ported for FreeRTOS and ESP32 platform by Roman Ukhov
  *
  * @section license License
  *
@@ -59,10 +60,15 @@
 
 namespace {
 
-  constexpr unsigned I2C_TIMEOUT_MS = 50;
+  constexpr auto TAG = "Adafruit_BMP085";
+
+  constexpr unsigned I2C_TIMEOUT_MS = 100;
 
   void delay(unsigned ms) {
-    vTaskDelay(ms / portTICK_PERIOD_MS);
+    auto ticks = ms / portTICK_PERIOD_MS;
+    if (ticks * portTICK_PERIOD_MS < ms)
+      ++ticks;
+    vTaskDelay(ticks);
   }
 }  // namespace
 
@@ -87,8 +93,10 @@ bool Adafruit_BMP085::begin(mode m, i2c_master_bus_handle_t bus) {
 
   ESP_ERROR_CHECK(i2c_master_bus_add_device(bus, &cfg, &i2c_dev));
 
-  if (read8(0xD0) != 0x55)
-    return false;
+  if (i2c_master_probe(bus, BMP085_I2CADDR, I2C_TIMEOUT_MS) != ESP_OK || read8(0xD0) != 0x55)
+    abort();
+
+  delay(10);
 
   /* read calibration data */
   ac1 = read16(BMP085_CAL_AC1);
@@ -105,30 +113,19 @@ bool Adafruit_BMP085::begin(mode m, i2c_master_bus_handle_t bus) {
   mc = read16(BMP085_CAL_MC);
   md = read16(BMP085_CAL_MD);
 #if (BMP085_DEBUG == 1)
-  Serial.print("ac1 = ");
-  Serial.println(ac1, DEC);
-  Serial.print("ac2 = ");
-  Serial.println(ac2, DEC);
-  Serial.print("ac3 = ");
-  Serial.println(ac3, DEC);
-  Serial.print("ac4 = ");
-  Serial.println(ac4, DEC);
-  Serial.print("ac5 = ");
-  Serial.println(ac5, DEC);
-  Serial.print("ac6 = ");
-  Serial.println(ac6, DEC);
+  ESP_LOGI(TAG, "ac1 =  %d", ac1);
+  ESP_LOGI(TAG, "ac2 =  %d", ac2);
+  ESP_LOGI(TAG, "ac3 =  %d", ac3);
+  ESP_LOGI(TAG, "ac4 =  %d", ac4);
+  ESP_LOGI(TAG, "ac5 =  %d", ac5);
+  ESP_LOGI(TAG, "ac6 =  %d", ac6);
 
-  Serial.print("b1 = ");
-  Serial.println(b1, DEC);
-  Serial.print("b2 = ");
-  Serial.println(b2, DEC);
+  ESP_LOGI(TAG, "b1 =  %d", b1);
+  ESP_LOGI(TAG, "b2 =  %d", b2);
 
-  Serial.print("mb = ");
-  Serial.println(mb, DEC);
-  Serial.print("mc = ");
-  Serial.println(mc, DEC);
-  Serial.print("md = ");
-  Serial.println(md, DEC);
+  ESP_LOGI(TAG, "mb =  %d", mb);
+  ESP_LOGI(TAG, "mc =  %d", mc);
+  ESP_LOGI(TAG, "md =  %d", md);
 #endif
 
   return true;
@@ -143,11 +140,11 @@ int32_t Adafruit_BMP085::computeB5(int32_t UT) {
 uint16_t Adafruit_BMP085::readRawTemperature(void) {
   write8(BMP085_CONTROL, BMP085_READTEMPCMD);
   delay(5);
+  auto raw = read16(BMP085_TEMPDATA);
 #if BMP085_DEBUG == 1
-  Serial.print("Raw temp: ");
-  Serial.println(read16(BMP085_TEMPDATA));
+  ESP_LOGI(TAG, "Raw temp: %d", raw);
 #endif
-  return read16(BMP085_TEMPDATA);
+  return raw;
 }
 
 uint32_t Adafruit_BMP085::readRawPressure(void) {
@@ -179,14 +176,13 @@ uint32_t Adafruit_BMP085::readRawPressure(void) {
   */
 
 #if BMP085_DEBUG == 1
-  Serial.print("Raw pressure: ");
-  Serial.println(raw);
+  ESP_LOGI(TAG, "Raw pressure: %u", (unsigned int)raw);
 #endif
   return raw;
 }
 
 int32_t Adafruit_BMP085::readPressure(void) {
-  int32_t UT, UP, B3, B5, B6, X1, X2, X3, p;
+  int32_t UT, UP, B3, B5, B6, X1 = 0, X2 = 0, X3, p;
   uint32_t B4, B7;
 
   UT = readRawTemperature();
@@ -212,12 +208,9 @@ int32_t Adafruit_BMP085::readPressure(void) {
   B5 = computeB5(UT);
 
 #if BMP085_DEBUG == 1
-  Serial.print("X1 = ");
-  Serial.println(X1);
-  Serial.print("X2 = ");
-  Serial.println(X2);
-  Serial.print("B5 = ");
-  Serial.println(B5);
+  ESP_LOGI(TAG, "X1 =  %d", (int)X1);
+  ESP_LOGI(TAG, "X2 =  %d", (int)X2);
+  ESP_LOGI(TAG, "B5 =  %d", (int)B5);
 #endif
 
   // do pressure calcs
@@ -228,14 +221,10 @@ int32_t Adafruit_BMP085::readPressure(void) {
   B3 = ((((int32_t)ac1 * 4 + X3) << oversampling) + 2) / 4;
 
 #if BMP085_DEBUG == 1
-  Serial.print("B6 = ");
-  Serial.println(B6);
-  Serial.print("X1 = ");
-  Serial.println(X1);
-  Serial.print("X2 = ");
-  Serial.println(X2);
-  Serial.print("B3 = ");
-  Serial.println(B3);
+  ESP_LOGI(TAG, "B6 =  %d", (int)B6);
+  ESP_LOGI(TAG, "X1 =  %d", (int)X1);
+  ESP_LOGI(TAG, "X2 =  %d", (int)X2);
+  ESP_LOGI(TAG, "B3 =  %d", (int)B3);
 #endif
 
   X1 = ((int32_t)ac3 * B6) >> 13;
@@ -245,14 +234,10 @@ int32_t Adafruit_BMP085::readPressure(void) {
   B7 = ((uint32_t)UP - B3) * (uint32_t)(50000UL >> oversampling);
 
 #if BMP085_DEBUG == 1
-  Serial.print("X1 = ");
-  Serial.println(X1);
-  Serial.print("X2 = ");
-  Serial.println(X2);
-  Serial.print("B4 = ");
-  Serial.println(B4);
-  Serial.print("B7 = ");
-  Serial.println(B7);
+  ESP_LOGI(TAG, "X1 =  %d", (int)X1);
+  ESP_LOGI(TAG, "X2 =  %d", (int)X2);
+  ESP_LOGI(TAG, "B4 =  %d", (unsigned int)B4);
+  ESP_LOGI(TAG, "B7 =  %d", (unsigned int)B7);
 #endif
 
   if (B7 < 0x80000000) {
@@ -265,18 +250,14 @@ int32_t Adafruit_BMP085::readPressure(void) {
   X2 = (-7357 * p) >> 16;
 
 #if BMP085_DEBUG == 1
-  Serial.print("p = ");
-  Serial.println(p);
-  Serial.print("X1 = ");
-  Serial.println(X1);
-  Serial.print("X2 = ");
-  Serial.println(X2);
+  ESP_LOGI(TAG, "p =  %d", (int)p);
+  ESP_LOGI(TAG, "X1 =  %d", (int)X1);
+  ESP_LOGI(TAG, "X2 =  %d", (int)X2);
 #endif
 
   p = p + ((X1 + X2 + (int32_t)3791) >> 4);
 #if BMP085_DEBUG == 1
-  Serial.print("p = ");
-  Serial.println(p);
+  ESP_LOGI(TAG, "p =  %d", (int)p);
 #endif
   return p;
 }
@@ -302,8 +283,8 @@ float Adafruit_BMP085::readTemperature(void) {
 #endif
 
   B5 = computeB5(UT);
-  temp = (B5 + 8) >> 4;
-  temp /= 10;
+  temp = (B5 + 8) / 160.;
+  //temp /= 10;
 
   return temp;
 }
@@ -322,33 +303,17 @@ float Adafruit_BMP085::readAltitude(float sealevelPressure) {
 
 uint8_t Adafruit_BMP085::read8(uint8_t a) {
   uint8_t ret;
-
-  // send 1 byte, reset i2c, read 1 byte
-  //i2c_dev->write_then_read(&a, 1, &ret, 1, true);
   ESP_ERROR_CHECK(i2c_master_transmit_receive(i2c_dev, &a, 1, &ret, 1, I2C_TIMEOUT_MS));
-
   return ret;
 }
 
 uint16_t Adafruit_BMP085::read16(uint8_t a) {
   uint8_t retbuf[2];
-  uint16_t ret;
-
-  // send 1 byte, reset i2c, read 2 bytes
-  // we could typecast uint16_t as uint8_t array but would need to ensure proper
-  // endianness
-  //i2c_dev->write_then_read(&a, 1, retbuf, 2, true);
   ESP_ERROR_CHECK(i2c_master_transmit_receive(i2c_dev, &a, 1, retbuf, 2, I2C_TIMEOUT_MS));
-
-  // write_then_read uses uint8_t array
-  ret = retbuf[1] | (retbuf[0] << 8);
-
-  return ret;
+  return retbuf[1] | (retbuf[0] << 8);
 }
 
 void Adafruit_BMP085::write8(uint8_t a, uint8_t d) {
   uint8_t buf[2] = {a, d};
-  // send d prefixed with a (a d [stop])
-  //i2c_dev->write(&d, 1, true, &a, 1);
   ESP_ERROR_CHECK(i2c_master_transmit(i2c_dev, buf, 2, I2C_TIMEOUT_MS));
 }

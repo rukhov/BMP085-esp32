@@ -15,6 +15,7 @@
  * products from Adafruit!
  *
  * Written by Limor Fried/Ladyada for Adafruit Industries.
+ * Ported for FreeRTOS and ESP32 platform by Roman Ukhov
  * BSD license, all text above must be included in any redistribution
  */
 
